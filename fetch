@@ -1,0 +1,132 @@
+#!/bin/zsh
+
+printf "\033c"
+
+# default arg values
+log_enabled=false
+debug=false
+INTERVAL=1
+LOG_FILE=log.txt
+
+# internal state
+CLEAR_SCREEN=false
+CHECKS=0
+PRINTED_LINES=0
+
+SPACER="_______________________________________________________________________"
+echo $SPACER
+# evaluate script arguments
+POSITIONAL=()
+while [[ $# -gt 0 ]]
+do
+key="$1"
+case $key in
+    -l|--log-to-file)
+    log_enabled=true;
+    shift
+    ;;
+    -d|--debug)
+    debug=true
+    shift
+    ;;
+    -i|--interval)
+    shift
+    INTERVAL=$1
+    shift
+    ;;
+esac
+done
+echo "debug mode: $debug"
+echo "logging to file '$LOG_FILE' enabled: $log_enabled"
+echo "refresh interval set to $INTERVAL"
+echo $SPACER
+set -- "${POSITIONAL[@]}" # restore positional parameters
+
+
+# Coloring
+COL_RESTORE='\033[0m'
+COL_RED='\033[00;31m'
+COL_GREEN='\033[00;32m'
+
+fetch () {
+    json_data=$(system_profiler SPPowerDataType SPHardwareDataType -json)
+}
+
+calc () {
+    cpu_speed=$(echo $json_data | jq -r ".SPHardwareDataType[].current_processor_speed")
+    cpu_speed=${cpu_speed/[[:space:]]*GHz/}
+    cpu_speed=${cpu_speed/,/}00
+    batt_cur_cap=$(echo $json_data | jq -r ".SPPowerDataType[].sppower_battery_charge_info.sppower_battery_current_capacity| select(. != null)| tonumber")
+    batt_max_cap=$(echo $json_data | jq -r ".SPPowerDataType[].sppower_battery_charge_info.sppower_battery_max_capacity| select(. != null)| tonumber")
+
+    batt_curr_milli_voltage=$(echo $json_data | jq -r ".SPPowerDataType[].sppower_current_voltage| select(. != null)| tonumber")
+    batt_curr_voltage=$( bc <<< "scale=3;$batt_curr_milli_voltage / 1000" )
+    batt_curr_milli_amperage=$(echo $json_data | jq -r ".SPPowerDataType[].sppower_current_amperage| select(. != null)| tonumber")
+    batt_curr_amperage=$( bc <<< "scale=3;$batt_curr_milli_amperage / 1000" )
+    batt_curr_watts=$(bc <<< "scale=3; $batt_curr_amperage * $batt_curr_voltage")
+    batt_curr_perc=$(bc <<< "scale=3; $batt_cur_cap / $batt_max_cap * 100")
+    is_charging=$(echo $json_data | jq -r '.SPPowerDataType[] | select(._name=="sppower_ac_charger_information")|.sppower_battery_is_charging|test("TRUE")')
+}
+
+clear () {
+    for i in {1..$PRINTED_LINES}
+    do
+        tput cuu1 # one line up
+        tput el # clear line
+    done
+    PRINTED_LINES=0
+}
+
+print_line () {
+    # column -t <<< $1
+    echo $1
+    PRINTED_LINES=$((PRINTED_LINES+1))
+}
+
+print_table () {
+    column -s "|" -t -x <<< echo "$1\n$2\n"
+}
+
+print_table () {
+    if [[ $CHECKS -gt "0" ]] ; then clear ; fi
+    header="CPU Mhz|Battery Capacity|Battery In-/Output"
+    # print_line $SPACER
+    COLOR=$COL_GREEN
+    if [[ "$batt_curr_amperage" -lt "0" ]]
+    then
+        COLOR=$COL_RED
+    fi 
+    data="${cpu_speed}|${batt_cur_cap}/${batt_max_cap}mAh|${batt_curr_amperage}A (${batt_curr_watts}W @ ${batt_curr_voltage}V)"
+    print_table $header $data
+    #print_line $SPACER
+}
+
+print () {
+    if [[ $CHECKS -gt "0" ]] ; then clear ; fi
+    print_line "CPU     Speed:    $cpu_speed \t\tMhz"
+    print_line "Battery Capacity: ${batt_curr_perc}% (${batt_cur_cap}/${batt_max_cap}mAh)"
+    if [[ "$batt_curr_amperage" -lt "0" ]]
+    then
+        TEMP_PRINT="${COL_RED}Battery Output: "
+    else
+        TEMP_PRINT="${COL_GREEN}Battery Input: "
+    fi 
+    print_line "${TEMP_PRINT}${batt_curr_watts}W (${batt_curr_amperage}A@${batt_curr_voltage}V)${COL_RESTORE}"
+    print_line "check($CHECKS): $(date)"
+    print_line $SPACER
+}
+
+log_to_file () {
+    printf "$(date +%s)\t$cpu_speed\t$batt_curr_amperage\t$batt_cur_cap\t$batt_curr_voltage\n" >> $LOG_FILE
+}
+
+while :
+do
+    fetch
+    calc
+    print
+    if $log_enabled ; then log_to_file ; fi
+    CHECKS=$((CHECKS+1))
+    sleep $INTERVAL
+done
+
